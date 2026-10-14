@@ -1,69 +1,318 @@
-name: Build LibreTV Android APK (With Background Cast)
+name: Build
 
+# 触发方式：
+#   1) 推送 v* 标签  → 构建 + 签名 + 自动发布 Release
+#   2) 手动触发      → 只构建 + 签名，产物在 Artifacts 里下载
 on:
-  workflow_dispatch:
   push:
-    branches: [ main, master ]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      build_aab:
+        description: '同时产出 AAB（用于上架 Google Play，普通安装用不到）'
+        type: boolean
+        default: false
+      allow_temporary_key:
+        description: '未配置密钥时改用临时密钥签名（产物无法覆盖安装，仅调试用）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: 27.0.12077973
 
 jobs:
-  build-android-apk:
+  # ─────────────────────────────────────────────────────────────
+  # Android APK：每个架构单独构建，产物小、下载快
+  # ─────────────────────────────────────────────────────────────
+  android:
+    name: Android APK (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: aarch64
+            rust: aarch64-linux-android
+            label: arm64-v8a
+          - abi: armv7
+            rust: armv7-linux-androideabi
+            label: armeabi-v7a
+          - abi: x86_64
+            rust: x86_64-linux-android
+            label: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # 显式安装 build-tools：签名要用的 zipalign / apksigner 都在里面，
+      # 不能依赖 Gradle 构建时"碰巧"装上
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.abi }}
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(f,'utf8'));c.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')" "$VERSION"
+          else
+            VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")-${GITHUB_SHA::7}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "构建版本：${VERSION}"
+
+      - name: Generate Android project
+        run: |
+          rm -rf src-tauri/gen/android
+          npx tauri android init --ci
+          node scripts/apply-android-overrides.mjs
+          npx tauri icon src-tauri/icons/icon.png
+
+      - name: Build APK
+        run: npx tauri android build --apk --target ${{ matrix.abi }} --ci
+
+      - name: Sign APK
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ALLOW_TEMP: ${{ inputs.allow_temporary_key || 'false' }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+
+          # ---- 1. 找到构建产物 -------------------------------------------------
+          mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -type f | sort)
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "::error::没有找到任何 APK 产物"
+            exit 1
+          fi
+          echo "找到 ${#APKS[@]} 个未签名 APK："
+          printf '  %s\n' "${APKS[@]}"
+
+          # ---- 2. 准备签名密钥 -------------------------------------------------
+          if [ -n "${ANDROID_KEYSTORE:-}" ]; then
+            echo "${ANDROID_KEYSTORE}" | base64 -d > release.jks
+            STORE_PASS="${ANDROID_KEYSTORE_PASSWORD}"
+            KEY_ALIAS="${ANDROID_KEY_ALIAS}"
+            KEY_PASS="${ANDROID_KEY_PASSWORD:-${ANDROID_KEYSTORE_PASSWORD}}"
+            SUFFIX=""
+            echo "::notice::✅ 使用仓库 Secrets 中的正式密钥签名"
+          else
+            if [ "${ALLOW_TEMP:-false}" != "true" ]; then
+              echo "::error::ANDROID_KEYSTORE 这个 Secret 还没配置。"
+              echo "::error::请先运行一次 “Generate Android keystore” workflow，"
+              echo "::error::把产物里的 3 个值填进 Settings → Secrets and variables → Actions。"
+              echo "::error::（只想先试一下构建？手动触发本 workflow 时勾选 allow_temporary_key）"
+              exit 1
+            fi
+            STORE_PASS="$(openssl rand -hex 16)"
+            KEY_PASS="$STORE_PASS"
+            KEY_ALIAS="libretv"
+            SUFFIX="-TEMPKEY"
+            keytool -genkeypair -keystore release.jks -storepass "$STORE_PASS" -keypass "$KEY_PASS" \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LibreTV"
+            echo "::warning::正在用【临时密钥】签名。这个包与其它构建签名不同，无法相互覆盖安装，请不要拿去正式使用。"
+          fi
+
+          BUILD_TOOLS="$(ls -d "${ANDROID_HOME}"/build-tools/* | sort -V | tail -n 1)"
+          echo "使用 build-tools：${BUILD_TOOLS}"
+
+          # ---- 3. 对齐 + 签名 --------------------------------------------------
+          mkdir -p dist
+          idx=0
+          for apk in "${APKS[@]}"; do
+            idx=$((idx + 1))
+            aligned="aligned-${idx}.apk"
+            if [ "${#APKS[@]}" -gt 1 ]; then
+              out="dist/LibreTV_${VERSION}_android_${LABEL}-${idx}${SUFFIX}.apk"
+            else
+              out="dist/LibreTV_${VERSION}_android_${LABEL}${SUFFIX}.apk"
+            fi
+
+            "${BUILD_TOOLS}/zipalign" -f -p 4 "$apk" "$aligned"
+            "${BUILD_TOOLS}/apksigner" sign \
+              --ks release.jks \
+              --ks-pass "pass:${STORE_PASS}" \
+              --key-pass "pass:${KEY_PASS}" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --out "$out" "$aligned"
+
+            echo "----- 签名校验：$(basename "$out") -----"
+            "${BUILD_TOOLS}/apksigner" verify --verbose --print-certs "$out"
+            ( cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256" )
+          done
+
+          rm -f release.jks aligned-*.apk
+
+          # ---- 4. 产物清单写进 Summary ----------------------------------------
+          {
+            echo "### Android 产物（${{ matrix.label }}）"
+            echo ""
+            echo '```'
+            ls -la dist/
+            cat dist/*.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-${{ matrix.abi }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────
+  # 可选：AAB（上架 Google Play 用，普通安装用不到）
+  # ─────────────────────────────────────────────────────────────
+  aab:
+    name: Android AAB
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.build_aab == true || inputs.build_aab == 'true') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: aab
+
+      - run: npm ci
+
+      - name: Generate Android project
+        run: |
+          rm -rf src-tauri/gen/android
+          npx tauri android init --ci
+          node scripts/apply-android-overrides.mjs
+          npx tauri icon src-tauri/icons/icon.png
+
+      - name: Build AAB
+        run: npx tauri android build --aab --ci
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-aab
+          path: src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────
+  # Windows 安装包（保持原样）
+  # ─────────────────────────────────────────────────────────────
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          node -e "const fs=require('fs');const f='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(f,'utf8'));c.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')" "${GITHUB_REF_NAME#v}"
+
+      - name: Build installers
+        run: npx tauri build
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp src-tauri/target/release/bundle/nsis/*.exe dist/
+          cp src-tauri/target/release/bundle/msi/*.msi dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/*
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────
+  # 打 tag 时自动发 Release
+  # ─────────────────────────────────────────────────────────────
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, windows]
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 检出当前仓库代码
-        uses: actions/checkout@v4
-
-      - name: 2. 安装 Node.js 环境
-        uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: '20'
+          path: dist
+          merge-multiple: true
 
-      - name: 3. 安装 Java JDK 17
-        uses: actions/setup-java@v4
+      - uses: softprops/action-gh-release@v2
         with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: 4. 配置 Android SDK 与 NDK (r26d)
-        uses: android-actions/setup-android@v3
-
-      - name: 5. 安装 Android NDK 与构建工具
-        run: |
-          sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
-
-      - name: 6. 安装 Rust 与 Android 交叉编译目标
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
-
-      - name: 7. 安装前端依赖与初始化 Android 工程（若尚未初始化）
-        run: |
-          npm install
-          npm install -D @tauri-apps/cli@^2.0.0
-          if [ ! -d "src-tauri/gen/android" ]; then
-            npx tauri android init
-          fi
-
-      - name: 8. 自动注入「📺 投屏 + 手机后台暂停释放」补丁
-        run: |
-          python3 apply_cast_patch.py
-
-      - name: 9. 编译生成 Android APK 并自动签名
-        run: |
-          npx tauri android build --apk --target aarch64
-          # 查找编译出的未签名或已签名 APK，使用 debug keystore 保底签名以便手机直接安装
-          APK_PATH=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
-          echo "Found APK: $APK_PATH"
-          if [[ "$APK_PATH" == *"unsigned"* ]]; then
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-            $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out LibreTV-Cast-Signed.apk "$APK_PATH"
-          else
-            cp "$APK_PATH" LibreTV-Cast-Signed.apk
-          fi
-
-      - name: 10. 上传可直接安装的 APK 成品包
-        uses: actions/upload-artifact@v4
-        with:
-          name: LibreTV-Android-Cast-APK
-          path: LibreTV-Cast-Signed.apk
+          files: dist/*
+          generate_release_notes: true
