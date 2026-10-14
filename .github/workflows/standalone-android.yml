@@ -1,0 +1,269 @@
+name: Build Standalone Offline LibreTV APK (Zero Server + Cast)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-standalone-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. 检出仓库源码
+        uses: actions/checkout@v4
+
+      - name: 2. 配置 Node.js 20 与 JDK 17
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 3. 配置 Android SDK 与 NDK (r26d)
+        uses: android-actions/setup-android@v3
+      - run: |
+          sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> $GITHUB_ENV
+
+      - name: 4. 安装 Rust 交叉编译工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: 5. 自动生成「纯本地免服务器 + 后台投屏」重构脚本并注入
+        run: |
+          cat << 'EOF' > build_standalone.py
+          import os, re, json, glob, shutil
+
+          # 1. 注入前端免服务器拦截器 + 投屏悬浮按钮 + 自动暂停释放手机逻辑
+          STANDALONE_JS = """
+          // === [LibreTV 纯本地离线独立包内核：免服务器跨域 + 后台投屏] ===
+          (function() {
+              const rawFetch = window.fetch.bind(window);
+              function unwrapProxyUrl(u) {
+                  try {
+                      const str = typeof u === 'string' ? u : u.url;
+                      const parsed = new URL(str, window.location.origin);
+                      if (parsed.pathname.includes('proxy') || parsed.searchParams.has('url')) {
+                          const target = parsed.searchParams.get('url');
+                          if (target && target.startsWith('http')) return decodeURIComponent(target);
+                      }
+                  } catch(e) {}
+                  return null;
+              }
+              window.fetch = async function(input, init) {
+                  const realTarget = unwrapProxyUrl(input);
+                  if (realTarget) {
+                      if (window.AndroidCast && typeof window.AndroidCast.nativeGet === 'function') {
+                          const resText = window.AndroidCast.nativeGet(realTarget);
+                          if (resText && !resText.startsWith('__ERROR__:')) {
+                              return new Response(resText, { status: 200, headers: { 'Access-Control-Allow-Origin': '*' } });
+                          }
+                      }
+                      return rawFetch(realTarget, init);
+                  }
+                  return rawFetch(input, init);
+              };
+
+              window.__libretvTriggerCast = function(artInstance, fallbackUrl) {
+                  let currentUrl = (artInstance && artInstance.url) ? artInstance.url : fallbackUrl;
+                  const unwrapped = unwrapProxyUrl(currentUrl);
+                  const realUrl = unwrapped || currentUrl;
+                  if (!realUrl || realUrl.startsWith('blob:')) {
+                      alert('请先等待视频开始加载后再点击投屏');
+                      return;
+                  }
+                  // 投屏瞬间自动暂停手机端播放与缓冲，解放手机切后台/锁屏
+                  try {
+                      if (artInstance && typeof artInstance.pause === 'function') artInstance.pause();
+                      if (artInstance && artInstance.hls) artInstance.hls.stopLoad();
+                      document.querySelectorAll('video').forEach(v => v.pause());
+                  } catch(e) {}
+
+                  if (navigator.clipboard) navigator.clipboard.writeText(realUrl).catch(()=>{});
+                  if (window.AndroidCast && typeof window.AndroidCast.castVideo === 'function') {
+                      window.AndroidCast.castVideo(realUrl, document.title || 'LibreTV');
+                      return;
+                  }
+                  const clean = realUrl.replace(/^https?:\\/\\//, '');
+                  const scheme = realUrl.startsWith('https') ? 'https' : 'http';
+                  window.location.href = `intent://${clean}#Intent;scheme=${scheme};type=video/*;action=android.intent.action.VIEW;end`;
+              };
+
+              function mountCastFab() {
+                  if (document.getElementById('libretv-cast-fab')) return;
+                  const btn = document.createElement('button');
+                  btn.id = 'libretv-cast-fab';
+                  btn.innerHTML = '📺 投屏电视';
+                  btn.style.cssText = 'position:fixed;bottom:24px;right:20px;z-index:99999;background:linear-gradient(135deg,#0ea5e9,#2563eb);color:#fff;border:none;border-radius:999px;padding:10px 18px;font-size:14px;font-weight:bold;box-shadow:0 4px 14px rgba(37,99,235,0.45);cursor:pointer;display:none;align-items:center;gap:6px;';
+                  btn.onclick = function() {
+                      const art = window.art || window.player || null;
+                      let vUrl = art ? art.url : '';
+                      if (!vUrl) {
+                          const v = document.querySelector('video');
+                          if (v && v.src) vUrl = v.src;
+                      }
+                      window.__libretvTriggerCast(art, vUrl);
+                  };
+                  document.body.appendChild(btn);
+                  setInterval(() => {
+                      const show = !!document.querySelector('video') || location.pathname.includes('player') || location.pathname.includes('watch');
+                      btn.style.display = show ? 'flex' : 'none';
+                  }, 1000);
+              }
+              if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountCastFab);
+              else mountCastFab();
+          })();
+          """
+
+          # 2. 为所有 HTML 和播放器 JS 注入免服务器投屏内核
+          for html_f in glob.glob('**/*.html', recursive=True):
+              if 'node_modules' in html_f or 'src-tauri' in html_f: continue
+              with open(html_f, 'r', encoding='utf-8', errors='ignore') as f: c = f.read()
+              if '__libretvTriggerCast' not in c and '</head>' in c:
+                  c = c.replace('</head>', f'<script>{STANDALONE_JS}</script>\n</head>', 1)
+                  with open(html_f, 'w', encoding='utf-8') as f: f.write(c)
+
+          for js_f in glob.glob('js/**/*.js', recursive=True) + glob.glob('src/**/*.tsx', recursive=True):
+              if not os.path.isfile(js_f): continue
+              with open(js_f, 'r', encoding='utf-8', errors='ignore') as f: c = f.read()
+              if 'new Artplayer' in c and '__libretvTriggerCast' not in c:
+                  ctrl = "{ position: 'right', html: '<span style=\"color:#38bdf8;font-weight:bold;\">📺 投屏</span>', click: function(){ window.__libretvTriggerCast(this, this.url); } },"
+                  c = re.sub(r'(controls\s*:\s*\[)', r'\1\n' + ctrl, c, count=1) + '\n' + STANDALONE_JS
+                  with open(js_f, 'w', encoding='utf-8') as f: f.write(c)
+
+          # 3. 准备静态打包目录 dist_web（自动把前端所有静态文件归集进去）
+          os.makedirs('dist_web', exist_ok=True)
+          for item in ['index.html', 'player.html', 'watch.html', 'css', 'js', 'image', 'images', 'assets', 'lib', 'manifest.json']:
+              if os.path.exists(item):
+                  dest = os.path.join('dist_web', item)
+                  if os.path.isdir(item): shutil.copytree(item, dest, dirs_exist_ok=True)
+                  else: shutil.copy2(item, dest)
+          EOF
+          python3 build_standalone.py
+
+      - name: 6. 初始化或更新 Tauri 2.0 纯本地离线工程
+        run: |
+          if [ ! -f "package.json" ]; then npm init -y; fi
+          npm install
+          npm install -D @tauri-apps/cli@^2.0.0
+          if [ ! -d "src-tauri" ]; then
+            npx tauri init --app-name LibreTV --window-title LibreTV --frontend-dist ../dist_web --dev-url http://localhost:3000 --before-dev-command "" --before-build-command ""
+          fi
+          if [ ! -d "src-tauri/gen/android" ]; then
+            npx tauri android init
+          fi
+
+      - name: 7. 注入 Android 原生无跨域引擎与投屏桥接 (MainActivity.kt)
+        run: |
+          cat << 'EOF' > patch_android.py
+          import glob, re
+
+          for kt_path in glob.glob('src-tauri/gen/android/**/MainActivity.kt', recursive=True):
+              with open(kt_path, 'r', encoding='utf-8', errors='ignore') as f: kt = f.read()
+              m = re.search(r'^package\s+([a-zA-Z0-9_.]+)', kt, re.MULTILINE)
+              pkg = m.group(1) if m else 'com.libretv.app'
+              new_kt = f"""package {pkg}
+
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.view.WindowManager
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.widget.Toast
+          import java.io.BufferedReader
+          import java.io.InputStreamReader
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          class MainActivity : TauriActivity() {{
+              override fun onCreate(savedInstanceState: Bundle?) {{
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+              }}
+
+              override fun onWebViewCreate(webView: WebView) {{
+                  super.onWebViewCreate(webView)
+                  webView.settings.apply {{
+                      javaScriptEnabled = true
+                      domStorageEnabled = true
+                      mediaPlaybackRequiresUserGesture = false
+                      mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                      allowFileAccess = true
+                      allowContentAccess = true
+                      allowFileAccessFromFileURLs = true
+                      allowUniversalAccessFromFileURLs = true
+                  }}
+                  webView.addJavascriptInterface(CastBridge(), "AndroidCast")
+              }}
+
+              inner class CastBridge {{
+                  @JavascriptInterface
+                  fun nativeGet(targetUrl: String): String {{
+                      return try {{
+                          val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {{
+                              requestMethod = "GET"
+                              connectTimeout = 8000
+                              readTimeout = 8000
+                              instanceFollowRedirects = true
+                              setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
+                          }}
+                          val res = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use {{ it.readText() }}
+                          conn.disconnect()
+                          res
+                      }} catch (e: Exception) {{
+                          "__ERROR__:" + e.message
+                      }}
+                  }}
+
+                  @JavascriptInterface
+                  fun castVideo(videoUrl: String, title: String?) {{
+                      runOnUiThread {{
+                          try {{
+                              val intent = Intent(Intent.ACTION_VIEW).apply {{
+                                  setDataAndType(Uri.parse(videoUrl), "video/*")
+                                  val safeTitle = if (title.isNullOrBlank()) "LibreTV 视频" else title
+                                  putExtra("title", safeTitle)
+                                  putExtra(Intent.EXTRA_TITLE, safeTitle)
+                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              }}
+                              startActivity(Intent.createChooser(intent, "选择投屏器推送至电视（手机可切后台）"))
+                          }} catch (e: Exception) {{
+                              Toast.makeText(this@MainActivity, "未找到投屏器！直链已复制，请安装 Web Video Caster 或 VLC", Toast.LENGTH_LONG).show()
+                          }}
+                      }}
+                  }}
+              }}
+          }}
+          """
+              with open(kt_path, 'w', encoding='utf-8') as f: f.write(new_kt)
+
+          for mf_path in glob.glob('src-tauri/gen/android/**/AndroidManifest.xml', recursive=True):
+              with open(mf_path, 'r', encoding='utf-8', errors='ignore') as f: mf = f.read()
+              if 'usesCleartextTraffic' not in mf:
+                  mf = mf.replace('<application', '<application android:usesCleartextTraffic="true"', 1)
+                  with open(mf_path, 'w', encoding='utf-8') as f: f.write(mf)
+          EOF
+          python3 patch_android.py
+
+      - name: 8. 编译生成纯本地离线 APK 并自动签名
+        run: |
+          npx tauri android build --apk --target aarch64
+          APK_PATH=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          if [[ "$APK_PATH" == *"unsigned"* ]]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out LibreTV-Standalone-Signed.apk "$APK_PATH"
+          else
+            cp "$APK_PATH" LibreTV-Standalone-Signed.apk
+          fi
+
+      - name: 9. 上传可直接安装的纯本地独立包 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreTV-Standalone-Offline-APK
+          path: LibreTV-Standalone-Signed.apk
