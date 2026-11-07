@@ -1,49 +1,36 @@
 {
-  "name": "momo 的影视源（点播 + 直播）· 2026-11-07 核实版",
-  "version": 3,
+  "name": "momo 的影视源（新增 5 源 + 直播）· 2026-11-07 核实版",
+  "version": 4,
   "updateUrl": "https://cdn.jsdelivr.net/gh/moonbrand1980-sudo/LibreTV-App@main/subscriptions/libretv-sources.json",
   "sources": [
     {
-      "name": "电影天堂资源",
-      "url": "http://caiji.dyttzyapi.com/api.php/provide/vod",
-      "detail": "http://caiji.dyttzyapi.com",
+      "name": "量子资源",
+      "url": "http://cj.lziapi.com/api.php/provide/vod",
+      "detail": "http://cj.lziapi.com",
       "isAdult": false
     },
     {
-      "name": "暴风资源",
-      "url": "https://bfzyapi.com/api.php/provide/vod",
+      "name": "红牛资源",
+      "url": "https://www.hongniuzy2.com/api.php/provide/vod",
+      "detail": "https://www.hongniuzy2.com",
       "isAdult": false
     },
     {
-      "name": "极速资源",
-      "url": "https://jszyapi.com/api.php/provide/vod",
-      "detail": "https://jszyapi.com",
+      "name": "光速资源",
+      "url": "https://api.guangsuapi.com/api.php/provide/vod",
+      "detail": "https://api.guangsuapi.com",
       "isAdult": false
     },
     {
-      "name": "最大资源",
-      "url": "https://api.zuidapi.com/api.php/provide/vod",
+      "name": "无尽资源",
+      "url": "https://api.wujinapi.com/api.php/provide/vod",
+      "detail": "https://api.wujinapi.com",
       "isAdult": false
     },
     {
-      "name": "360资源",
-      "url": "https://360zy.com/api.php/provide/vod",
-      "isAdult": false
-    },
-    {
-      "name": "百度云资源",
-      "url": "https://api.apibdzy.com/api.php/provide/vod",
-      "isAdult": false
-    },
-    {
-      "name": "非凡影视",
-      "url": "http://ffzy5.tv/api.php/provide/vod",
-      "detail": "http://ffzy5.tv",
-      "isAdult": false
-    },
-    {
-      "name": "魔都资源",
-      "url": "https://www.mdzyapi.com/api.php/provide/vod",
+      "name": "豪华资源",
+      "url": "https://hhzyapi.com/api.php/provide/vod",
+      "detail": "https://hhzyapi.com",
       "isAdult": false
     }
   ],
@@ -59,12 +46,11 @@
   ],
   "_verified": {
     "date": "2026-11-07",
-    "vod": "8/8 实测 HTTP 200 + MacCMS JSON（list 非空）",
-    "vodNote": "8 个源与 App 内置 API_SITES 完全一致，无增量；订阅仅作换机/其它播放器导入用",
-    "liveSelected": "22 台中 19 台可播；死链：CCTV-15 音乐(404)、东方卫视国际(404)、广州电视台(403)",
-    "liveFull": "151 条直链，抽查 22 条仅 9 条可播",
-    "liveReplacement": "libretv-live.m3u：19 条可播 + 3 条实测替代，共 22 台全部 200/206",
-    "note": "本 App 当前不解析 liveSources（未移植直播），该字段供其它播放器使用",
-    "hosting": "GitHub raw + jsDelivr 永久托管；jsDelivr 默认缓存 12 小时，改完想立刻生效可加 ?v=日期"
+    "newSources": "5 个均为 App 内置 API_SITES 之外的新源，各测两轮（关键词 庆余年 / 三体），搜索 -> m3u8 -> 首个分片全部 206",
+    "timing": "量子 2.2s / 红牛 3.3s / 光速 4.6s / 无尽 5.7s / 豪华 4.3-7.9s（含首分片耗时，可作优选顺序）",
+    "excluded": "暴风/天堂/魔都/极速/最大/百度 的备用域名均 DNS 不可达；天空(m3u8.tiankongapi.com)返回 HTML；卧龙域名待售；索尼 / MT 不支持搜索",
+    "builtinNote": "App 内置 API_SITES 已有 dyttzy/bfzy/ffzy/zy360/jisu/mdzy/zuid/baidu 共 8 源，故此处只放增量，导入不会与内置重复",
+    "liveSelected": "22 台中 19 台可播；死链 CCTV-15 音乐、东方卫视国际、广州电视台已剔除并补入替代",
+    "note": "本 App 不解析 liveSources（未移植直播），该字段供其它播放器使用"
   }
 }
