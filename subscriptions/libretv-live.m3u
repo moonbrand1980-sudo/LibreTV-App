@@ -1,0 +1,47 @@
+#EXTM3U
+# 核实时间 2026-11-07；逐台 Range 探测，仅保留 HTTP 200/206 的条目
+# 来源 paste.rs/gEaVK，剔除 3 条死链并补入 3 条实测可播频道
+#EXTINF:-1,CCTV+ 新闻 1
+https://cd-live-stream.news.cctvplus.com/live/smil:CHANNEL1.smil/playlist.m3u8
+#EXTINF:-1,CCTV+ 新闻 2
+https://cd-live-stream.news.cctvplus.com/live/smil:CHANNEL2.smil/playlist.m3u8
+#EXTINF:-1,CCTV-4 中文国际（欧洲）
+https://dash2.antik.sk/live/test_cctv_tizen/playlist.m3u8
+#EXTINF:-1,CCTV-9 纪录
+https://xykt-fix.github.io/Y77.m3u8
+#EXTINF:-1,CGTN 中国国际电视台
+https://amg00405-rakutentv-cgtn-rakuten-i9tar.amagi.tv/master.m3u8
+#EXTINF:-1,CGTN 财经
+https://fastlive.cctvplus.com/out/v1/2b3d8a0c805d437f9dc85b764c2ac599/index.m3u8
+#EXTINF:-1,中国旅游
+https://fastlive.cctvplus.com/out/v1/ca6f9297b7314a63959435028af287fc/index.m3u8
+#EXTINF:-1,发现中国
+https://fastlive.cctvplus.com/out/v1/8442c3bfd4c64a3984389328f6087879/index.m3u8
+#EXTINF:-1,东莞新闻综合
+https://stream.sun0769.com/dgrtv1/mp4tv1_800/index.m3u8
+#EXTINF:-1,兰州文旅
+https://liveplus.lzr.com.cn/wlpd/HD/live.m3u8
+#EXTINF:-1,兰州新闻综合
+https://liveplus.lzr.com.cn/xwzh/HD/live.m3u8
+#EXTINF:-1,哈尔滨影视
+https://stream.hrbtv.net/yspd/playlist.m3u8
+#EXTINF:-1,哈尔滨新闻综合
+https://stream.hrbtv.net/xwzh/playlist.m3u8?_upt=ef41dd531755913594
+#EXTINF:-1,安徽卫视
+https://restream.pdtvhd.com/memfs/c1cd2ed0-3b2b-4c25-af98-a7fb0b1eb130.m3u8
+#EXTINF:-1,安顺新闻综合
+https://hplayer1.juyun.tv/camera/154379194.m3u8
+#EXTINF:-1,河北卫视 4K
+https://event.pull.hebtv.com/live/live101.m3u8
+#EXTINF:-1,浙江国际
+https://ali-m-l.cztv.com/channels/lantian/channel10/1080p.m3u8
+#EXTINF:-1,白城电视台
+https://stream2.jlntv.cn/baicheng1/sd/live.m3u8
+#EXTINF:-1,西藏卫视
+https://pili-live-hls-zdzz-tv.zzxwcm.cn/zdzz-tv/nqzh.m3u8
+#EXTINF:-1,CCTV-15 音乐
+http://74.91.26.218:82/live/cctv15hd.m3u8
+#EXTINF:-1,CCTV-1 综合
+http://74.91.26.218:82/live/cctv1hd.m3u8
+#EXTINF:-1,CCTV-13 新闻
+http://74.91.26.218:82/live/cctv13hd.m3u8
